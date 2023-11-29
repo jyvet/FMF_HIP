@@ -255,8 +255,10 @@ extern "C"
                 float *cc_out_d = NULL;
                 hipStreamCreateWithFlags(&streams[t], hipStreamNonBlocking);
                 
-                hipMallocAsync((void **)&cc_mat_d, sizeof_cc_mat * n_templates, streams[t]);
-                hipMallocAsync((void **)&cc_out_d, sizeof_cc_out * n_templates, streams[t]);
+                hipMallocAsync((void **)&cc_mat_d, sizeof_cc_mat, streams[t]);
+                hipMemsetAsync(cc_mat_d, 0, sizeof_cc_mat, streams[t]);
+
+                hipMallocAsync((void **)&cc_out_d, sizeof_cc_out, streams[t]);
                 size_t n_corr_t;
                 int max_moveout;
                 float *templates_d_t = NULL;
@@ -324,7 +326,6 @@ extern "C"
                     dim3 GS(ceilf(cs / (float)BS.x) * n_stations);
 
                     // process
-                    hipMemsetAsync(&cc_mat_d[sizeof_cc_mat * t], 0, sizeof_cc_mat, streams[t]); // initialize cc_mat to 0
                     hipLaunchKernelGGL(network_corr, dim3(GS), dim3(BS), sharedMem, streams[t], templates_d_t,
                                                         sum_square_templates_d_t,
                                                         moveouts_d_t,
