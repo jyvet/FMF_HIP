@@ -92,17 +92,15 @@ extern "C"
                 {
                     ss_template[0] = sum_square_template[sum_square_template_offset];
                 }
-                while (t_idx < n_samples_template)
-                {
-                    templates_s[t_idx] = templates[templates_offset + t_idx];
-                    if ((first_sample_trace + t_idx) < n_samples_data)
-                        data_s[t_idx] = data[data_offset + t_idx];
-                    t_idx += blockDim.x;
-                }
+
                 while (t_idx < (blockDim.x * step + n_samples_template))
                 {
+                    if (t_idx < n_samples_template)
+                        templates_s[t_idx] = templates[templates_offset + t_idx];
+
                     if ((first_sample_trace + t_idx) < n_samples_data)
                         data_s[t_idx] = data[data_offset + t_idx];
+                        
                     t_idx += blockDim.x;
                 }
 
@@ -227,8 +225,6 @@ extern "C"
                 printf("Reduce the number of templates or stations processed in one batch.\n");
                 exit(0);
             }
-
-
 
             // allocate GPU memory
             hipMalloc((void **)&templates_d, sizeof_templates);
