@@ -39,8 +39,8 @@ extern "C"
     }
 
     //-------------------------------------------------------------------------
-    __global__ void network_corr(float *templates, float *sum_square_template,
-                                 int *moveout, float *data, float *weights,
+    __global__ void network_corr(const float * __restrict__ templates, const float * __restrict__ sum_square_template,
+                                 const int * __restrict__ moveout, const float * __restrict__ data, const float * __restrict__ weights,
                                  const size_t step, const size_t n_samples_template, const size_t n_samples_data,
                                  const size_t n_stations, const size_t n_components,
                                  const size_t chunk_offset, const size_t chunk_size,
