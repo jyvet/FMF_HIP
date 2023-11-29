@@ -41,10 +41,10 @@ extern "C"
     //-------------------------------------------------------------------------
     __global__ void network_corr(float *templates, float *sum_square_template,
                                  int *moveout, float *data, float *weights,
-                                 size_t step, size_t n_samples_template, size_t n_samples_data,
-                                 size_t n_stations, size_t n_components,
-                                 size_t chunk_offset, size_t chunk_size,
-                                 float *cc_mat, int normalize)
+                                 const size_t step, const size_t n_samples_template, const size_t n_samples_data,
+                                 const size_t n_stations, const size_t n_components,
+                                 const size_t chunk_offset, const size_t chunk_size,
+                                 float *cc_mat, const int normalize)
     {
 
         // each thread matches the template to one time in the data
