@@ -226,6 +226,25 @@ extern "C"
         hipMalloc((void **)&data_d, sizeof_data);
         hipMemcpy(data_d, data, sizeof_data, hipMemcpyHostToDevice);
 
+        // calculate the space required in the shared memory
+        const size_t count_template = (n_samples_template / WARPSIZE + 1) * WARPSIZE;
+        const size_t count_data = ((n_samples_template + BLOCKSIZE * step) / WARPSIZE + 1) * WARPSIZE;
+        const size_t sharedMem = (count_template + count_data + 1) * sizeof(float);
+        if (sharedMem > maxSharedMem)
+        {
+            size_t new_step = (maxSharedMem / sizeof(float) - 2 * n_samples_template - 2 * WARPSIZE) / BLOCKSIZE;
+            int new_length = maxSharedMem / sizeof(float) - count_data - WARPSIZE;
+            if (new_length < 0)
+                new_length = 0;
+            printf("The maximum shared memory available on this card is %zu Mb "
+                   "(%zu Mb required). You should consider the different options:\n"
+                   "  - Change the temporal step to %zu without changing the template length.\n"
+                   "  - Change the template length to %d without changing the temporal step.\n"
+                   "  - Try to decrease both of these parameters.\n",
+                   maxSharedMem / Mb, sharedMem / Mb, new_step, new_length);
+            exit(0);
+        }
+
         hipStream_t *streams = (hipStream_t*) malloc(n_templates * sizeof(hipStream_t));
         // loop over templates
         for (size_t t = 0; t < n_templates; t++)
@@ -266,25 +285,6 @@ extern "C"
             float *sum_square_templates_d_t = NULL;
             float *weights_d_t = NULL;
             int maxSharedMem = props.sharedMemPerBlock;
-
-            // calculate the space required in the shared memory
-            size_t count_template = (n_samples_template / WARPSIZE + 1) * WARPSIZE;
-            size_t count_data = ((n_samples_template + BLOCKSIZE * step) / WARPSIZE + 1) * WARPSIZE;
-            size_t sharedMem = (count_template + count_data + 1) * sizeof(float);
-            if (sharedMem > maxSharedMem)
-            {
-                size_t new_step = (maxSharedMem / sizeof(float) - 2 * n_samples_template - 2 * WARPSIZE) / BLOCKSIZE;
-                int new_length = maxSharedMem / sizeof(float) - count_data - WARPSIZE;
-                if (new_length < 0)
-                    new_length = 0;
-                printf("The maximum shared memory available on this card is %zu Mb "
-                       "(%zu Mb required). You should consider the different options:\n"
-                       "  - Change the temporal step to %zu without changing the template length.\n"
-                       "  - Change the template length to %d without changing the temporal step.\n"
-                       "  - Try to decrease both of these parameters.\n",
-                       maxSharedMem / Mb, sharedMem / Mb, new_step, new_length);
-                exit(0);
-            }
 
             // compute the number of correlation steps for this template
             moveouts_t = moveouts + t * n_stations * n_components;
