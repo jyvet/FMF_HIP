@@ -202,6 +202,19 @@ extern "C"
         return sharedMem;
     }
 
+typedef struct gpu_template
+{
+    int    id;
+    float *cc_mat_d;
+    float *cc_out_d;
+    float *templates_d;
+    int   *moveouts_d;
+    float *sum_square_templates_d;
+    float *weights_d;
+    float *data_d;
+    hipStream_t streams[NCHUNKS];
+} gpu_template_t;
+
     //-------------------------------------------------------------------------
     void matched_filter(float *templates, float *sum_square_templates,
                         int *moveouts, float *data, float *weights, size_t step,
@@ -236,7 +249,6 @@ extern "C"
         size_t sizeof_weights = sizeof(float) * n_templates * n_stations * n_components;
         size_t sizeof_total = sizeof_templates + sizeof_moveouts + sizeof_data + sizeof_cc_mat + sizeof_cc_out + sizeof_sum_square_templates + sizeof_weights;
 
-        float *data_d = NULL;
         int id;
 
         // Card-dependent settings: prefer L1 cache or shared memory
@@ -256,39 +268,36 @@ extern "C"
         }
 
         // allocate GPU memory
-        hipMalloc((void **)&data_d, sizeof_data);
-        hipMemcpy(data_d, data, sizeof_data, hipMemcpyHostToDevice);
+        gpu_template_t gpu = { 0 };
+        hipMalloc((void **)&gpu.data_d, sizeof_data);
 
-        const size_t sharedMem = check_sharedMem(0, n_samples_template, step);
+        hipMallocAsync((void **)&gpu.cc_mat_d, sizeof_cc_mat, NULL);
+        hipMallocAsync((void **)&gpu.cc_out_d, sizeof_cc_out, NULL);
+
+        const size_t bytes = n_stations * n_components * sizeof(float);
+        hipMallocAsync((void **)&gpu.moveouts_d, bytes, NULL);
+        hipMallocAsync((void **)&gpu.weights_d, bytes, NULL);
+        hipMallocAsync((void **)&gpu.sum_square_templates_d, bytes, NULL);
+        hipMallocAsync((void **)&gpu.templates_d, bytes * n_samples_template, NULL);
+
+        hipMemcpyAsync(gpu.data_d, data, sizeof_data, hipMemcpyHostToDevice, NULL);
+
+        const size_t sharedMem = check_sharedMem(gpu.id, n_samples_template, step);
+
+        for (size_t ch = 0; ch < NCHUNKS; ch++)
+            hipStreamCreateWithFlags(&gpu.streams[ch], hipStreamNonBlocking);
+
+        hipDeviceSynchronize();
 
         // loop over templates
         for (size_t t = 0; t < n_templates; t++)
-        {
-            float *cc_mat_d = NULL;
-            float *cc_out_d = NULL;
-            float *templates_d = NULL;
-            int *moveouts_d = NULL;
-            float *sum_square_templates_d = NULL;
-            float *weights_d = NULL;
-                
-            hipMallocAsync((void **)&cc_mat_d, sizeof_cc_mat, NULL);
-            hipMemsetAsync(cc_mat_d, 0, sizeof_cc_mat, NULL);
+        {       
+            hipMemsetAsync(gpu.cc_mat_d, 0, sizeof_cc_mat, NULL);
 
-            hipMallocAsync((void **)&cc_out_d, sizeof_cc_out, NULL);
-
-            size_t bytes = n_stations * n_components * sizeof(float);
-            hipMallocAsync((void **)&sum_square_templates_d, bytes, NULL);
-            hipMemcpyAsync(sum_square_templates_d, &sum_square_templates[t * n_stations * n_components], bytes, hipMemcpyHostToDevice, NULL);
-
-            hipMallocAsync((void **)&moveouts_d, bytes, NULL);
-            hipMemcpyAsync(moveouts_d, &moveouts[t * n_stations * n_components], bytes, hipMemcpyHostToDevice, NULL);
-
-            hipMallocAsync((void **)&weights_d, bytes, NULL);
-            hipMemcpyAsync(weights_d, &weights[t * n_stations * n_components], bytes, hipMemcpyHostToDevice, NULL);
-
-            bytes *= n_samples_template;
-            hipMallocAsync((void **)&templates_d, bytes, NULL);
-            hipMemcpyAsync(templates_d, &templates[t * n_samples_template * n_stations * n_components], bytes, hipMemcpyHostToDevice, NULL);
+            hipMemcpyAsync(gpu.sum_square_templates_d, &sum_square_templates[t * n_stations * n_components], bytes, hipMemcpyHostToDevice, NULL);
+            hipMemcpyAsync(gpu.moveouts_d, &moveouts[t * n_stations * n_components], bytes, hipMemcpyHostToDevice, NULL);
+            hipMemcpyAsync(gpu.weights_d, &weights[t * n_stations * n_components], bytes, hipMemcpyHostToDevice, NULL);
+            hipMemcpyAsync(gpu.templates_d, &templates[t * n_samples_template * n_stations * n_components], bytes * n_samples_template, hipMemcpyHostToDevice, NULL);
 
             size_t n_corr_t;
             int max_moveout;
@@ -311,12 +320,9 @@ extern "C"
 
             hipDeviceSynchronize();
 
-            hipStream_t streams[NCHUNKS];
             //#pragma omp parallel for
             for (size_t ch = 0; ch < NCHUNKS; ch++)
             {
-                hipStreamCreateWithFlags(&streams[ch], hipStreamNonBlocking);
-
                 size_t chunk_offset = ch * chunk_size;
                 size_t cs;
                 // make sure the chunk is not going out of bounds
@@ -336,11 +342,11 @@ extern "C"
                 dim3 GS(ceilf(cs / (float)BS.x) * n_stations);
 
                     // process
-                hipLaunchKernelGGL(network_corr, dim3(GS), dim3(BS), sharedMem, streams[ch], templates_d,
-                                                    sum_square_templates_d,
-                                                    moveouts_d,
-                                                    data_d,
-                                                    weights_d,
+                hipLaunchKernelGGL(network_corr, dim3(GS), dim3(BS), sharedMem, gpu.streams[ch], gpu.templates_d,
+                                                    gpu.sum_square_templates_d,
+                                                    gpu.moveouts_d,
+                                                    gpu.data_d,
+                                                    gpu.weights_d,
                                                     step,
                                                     n_samples_template,
                                                     n_samples_data,
@@ -348,7 +354,7 @@ extern "C"
                                                     n_components,
                                                     chunk_offset,
                                                     cs,
-                                                    cc_mat_d,
+                                                    gpu.cc_mat_d,
                                                     normalize);
 
                 // return an error if something happened in the kernel (and crash the program)
@@ -357,12 +363,12 @@ extern "C"
                 if (sum_cc_mode > 0)
                 {
                     // weighted sum of correlation coefficients
-                    hipMemsetAsync(cc_out_d, 0, sizeof_cc_out, streams[ch]);
+                    hipMemsetAsync(gpu.cc_out_d, 0, sizeof_cc_out, gpu.streams[ch]);
 
                     // using a small block size seems to improve the speed of sum_cc
                     dim3 BS_sum(32);
                     dim3 GS_sum(ceilf(cs / (float)BS_sum.x));
-                    hipLaunchKernelGGL(sum_cc, dim3(GS_sum), dim3(BS_sum), 0, streams[ch], cc_mat_d, cc_out_d, weights_d,
+                    hipLaunchKernelGGL(sum_cc, dim3(GS_sum), dim3(BS_sum), 0, gpu.streams[ch], gpu.cc_mat_d, gpu.cc_out_d, gpu.weights_d,
                                                n_stations, n_components,
                                                n_corr_t, chunk_offset, cs);
 
@@ -372,29 +378,29 @@ extern "C"
                     // xfer cc_sum back to host
                     sizeof_cc_out_chunk = sizeof(float) * cs;
                     cc_out_t = cc_out + t * n_corr + chunk_offset;
-                    hipMemcpyAsync(cc_out_t, cc_out_d, sizeof_cc_out_chunk, hipMemcpyDeviceToHost, streams[ch]);
+                    hipMemcpyAsync(cc_out_t, gpu.cc_out_d, sizeof_cc_out_chunk, hipMemcpyDeviceToHost, gpu.streams[ch]);
                 }
                 else
                 {
                     // xfer cc_mat back to host
                     sizeof_cc_out_chunk = sizeof(float) * cs * n_stations * n_components;
                     cc_out_t = cc_out + (t * n_corr + chunk_offset) * n_stations * n_components;
-                    hipMemcpyAsync(cc_out_t, cc_mat_d, sizeof_cc_out_chunk, hipMemcpyDeviceToHost, streams[ch]);
+                    hipMemcpyAsync(cc_out_t, gpu.cc_mat_d, sizeof_cc_out_chunk, hipMemcpyDeviceToHost, gpu.streams[ch]);
                 }
             }
 
             hipDeviceSynchronize();
-            for (size_t ch = 0; ch < NCHUNKS; ch++)
-                hipStreamDestroy(streams[ch]);
-
-            hipFreeAsync(cc_mat_d, NULL);
-            hipFreeAsync(cc_out_d, NULL);
-            hipFreeAsync(sum_square_templates_d, NULL);
-            hipFreeAsync(weights_d, NULL);
-            hipFreeAsync(templates_d, NULL);
-            hipFreeAsync(moveouts_d, NULL);
         }
 
-        hipFree(data_d);
+        for (size_t ch = 0; ch < NCHUNKS; ch++)
+            hipStreamDestroy(gpu.streams[ch]);
+
+        hipFreeAsync(gpu.cc_mat_d, NULL);
+        hipFreeAsync(gpu.cc_out_d, NULL);
+        hipFreeAsync(gpu.sum_square_templates_d, NULL);
+        hipFreeAsync(gpu.weights_d, NULL);
+        hipFreeAsync(gpu.templates_d, NULL);
+        hipFreeAsync(gpu.moveouts_d, NULL);
+        hipFreeAsync(gpu.data_d, NULL);
     }     //  matched_filter
 } // extern C
