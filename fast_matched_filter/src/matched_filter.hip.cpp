@@ -200,11 +200,7 @@ extern "C"
         size_t sizeof_weights = sizeof(float) * n_templates * n_stations * n_components;
         size_t sizeof_total = sizeof_templates + sizeof_moveouts + sizeof_data + sizeof_cc_mat + sizeof_cc_out + sizeof_sum_square_templates + sizeof_weights;
 
-        float *templates_d = NULL;
         float *data_d = NULL;
-        int *moveouts_d = NULL;
-        float *sum_square_templates_d = NULL;
-        float *weights_d = NULL;
         int id;
 
         hipDeviceProp_t props;
@@ -227,21 +223,8 @@ extern "C"
         }
 
         // allocate GPU memory
-        hipMalloc((void **)&templates_d, sizeof_templates);
-        hipMalloc((void **)&moveouts_d, sizeof_moveouts);
         hipMalloc((void **)&data_d, sizeof_data);
-        hipMalloc((void **)&sum_square_templates_d, sizeof_sum_square_templates);
-        hipMalloc((void **)&weights_d, sizeof_weights);
-
-        // transfer the inputs from host to the GPU
         hipMemcpy(data_d, data, sizeof_data, hipMemcpyHostToDevice);
-
-        /* TODO: per stream*/
-        hipMemcpy(templates_d, templates, sizeof_templates, hipMemcpyHostToDevice);
-        hipMemcpy(moveouts_d, moveouts, sizeof_moveouts, hipMemcpyHostToDevice);
-        hipMemcpy(sum_square_templates_d, sum_square_templates, sizeof_sum_square_templates, hipMemcpyHostToDevice);
-        hipMemcpy(weights_d, weights, sizeof_weights, hipMemcpyHostToDevice);
-
 
         hipStream_t *streams = (hipStream_t*) malloc(n_templates * sizeof(hipStream_t));
         // loop over templates
@@ -249,12 +232,32 @@ extern "C"
         {
             float *cc_mat_d = NULL;
             float *cc_out_d = NULL;
+            float *templates_d = NULL;
+            int *moveouts_d = NULL;
+            float *sum_square_templates_d = NULL;
+            float *weights_d = NULL;
+
             hipStreamCreateWithFlags(&streams[t], hipStreamNonBlocking);
                 
             hipMallocAsync((void **)&cc_mat_d, sizeof_cc_mat, streams[t]);
             hipMemsetAsync(cc_mat_d, 0, sizeof_cc_mat, streams[t]);
 
             hipMallocAsync((void **)&cc_out_d, sizeof_cc_out, streams[t]);
+
+            size_t bytes = n_stations * n_components * sizeof(float);
+            hipMallocAsync((void **)&sum_square_templates_d, bytes, streams[t]);
+            hipMemcpyAsync(sum_square_templates_d, &sum_square_templates[t * n_stations * n_components], bytes, hipMemcpyHostToDevice, streams[t]);
+
+            hipMallocAsync((void **)&moveouts_d, bytes, streams[t]);
+            hipMemcpyAsync(moveouts_d, &moveouts[t * n_stations * n_components], bytes, hipMemcpyHostToDevice, streams[t]);
+
+            hipMallocAsync((void **)&weights_d, bytes, streams[t]);
+            hipMemcpyAsync(weights_d, &weights[t * n_stations * n_components], bytes, hipMemcpyHostToDevice, streams[t]);
+
+            bytes *= n_samples_template;
+            hipMallocAsync((void **)&templates_d, bytes, streams[t]);
+            hipMemcpyAsync(templates_d, &templates[t * n_samples_template * n_stations * n_components], bytes, hipMemcpyHostToDevice, streams[t]);
+
             size_t n_corr_t;
             int max_moveout;
             float *templates_d_t = NULL;
@@ -294,12 +297,6 @@ extern "C"
             }
             n_corr_t = (n_samples_data - n_samples_template - max_moveout) / step + 1;
 
-            // local pointers on the device
-            templates_d_t = templates_d + t * n_samples_template * n_stations * n_components;
-            sum_square_templates_d_t = sum_square_templates_d + t * n_stations * n_components;
-            moveouts_d_t = moveouts_d + t * n_stations * n_components;
-            weights_d_t = weights_d + t * n_stations * n_components;
-
             //#pragma omp parallel for
             for (size_t ch = 0; ch < NCHUNKS; ch++)
             {
@@ -322,11 +319,11 @@ extern "C"
                 dim3 GS(ceilf(cs / (float)BS.x) * n_stations);
 
                     // process
-                hipLaunchKernelGGL(network_corr, dim3(GS), dim3(BS), sharedMem, streams[t], templates_d_t,
-                                                    sum_square_templates_d_t,
-                                                    moveouts_d_t,
+                hipLaunchKernelGGL(network_corr, dim3(GS), dim3(BS), sharedMem, streams[t], templates_d,
+                                                    sum_square_templates_d,
+                                                    moveouts_d,
                                                     data_d,
-                                                    weights_d_t,
+                                                    weights_d,
                                                     step,
                                                     n_samples_template,
                                                     n_samples_data,
@@ -348,7 +345,7 @@ extern "C"
                     // using a small block size seems to improve the speed of sum_cc
                     dim3 BS_sum(32);
                     dim3 GS_sum(ceilf(cs / (float)BS_sum.x));
-                    hipLaunchKernelGGL(sum_cc, dim3(GS_sum), dim3(BS_sum), 0, streams[t], cc_mat_d, cc_out_d, weights_d_t,
+                    hipLaunchKernelGGL(sum_cc, dim3(GS_sum), dim3(BS_sum), 0, streams[t], cc_mat_d, cc_out_d, weights_d,
                                                n_stations, n_components,
                                                n_corr_t, chunk_offset, cs);
 
@@ -371,17 +368,15 @@ extern "C"
 
             hipFreeAsync(cc_mat_d, streams[t]);
             hipFreeAsync(cc_out_d, streams[t]);
+            hipFreeAsync(sum_square_templates_d, streams[t]);
+            hipFreeAsync(weights_d, streams[t]);
+            hipFreeAsync(templates_d, streams[t]);
+            hipFreeAsync(moveouts_d, streams[t]);
         }
 
         hipDeviceSynchronize();
 
-        // free device memory
-        hipFree(templates_d);
-        hipFree(moveouts_d);
         hipFree(data_d);
-
-        hipFree(sum_square_templates_d);
-        hipFree(weights_d);
 
         free(streams);
     }     //  matched_filter
