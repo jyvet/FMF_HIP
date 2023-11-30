@@ -252,6 +252,8 @@ typedef struct gpu_template
 
         // Initialize all GPUs
         gpu_template_t *gpus = (gpu_template_t *)malloc(sizeof(gpu_template_t) * nGPUs);
+
+        #pragma omp parallel for schedule(static,1) num_threads(nGPUs)
         for (int gid = 0; gid < nGPUs; gid++)
         {
             gpu_template_t *gpu = &gpus[gid];
@@ -274,24 +276,24 @@ typedef struct gpu_template
                 exit(0);
             }
 
-            hipMalloc((void **)&gpu->data_d, sizeof_data);
-
-            hipMallocAsync((void **)&gpu->cc_mat_d, sizeof_cc_mat, NULL);
-            hipMallocAsync((void **)&gpu->cc_out_d, sizeof_cc_out, NULL);
-
-            hipMallocAsync((void **)&gpu->moveouts_d, bytes, NULL);
-            hipMallocAsync((void **)&gpu->weights_d, bytes, NULL);
-            hipMallocAsync((void **)&gpu->sum_square_templates_d, bytes, NULL);
-            hipMallocAsync((void **)&gpu->templates_d, bytes * n_samples_template, NULL);
-
-            hipMemcpyAsync(gpu->data_d, data, sizeof_data, hipMemcpyHostToDevice, NULL);
-
-            gpu->sharedMem = check_sharedMem(gpu->id, n_samples_template, step);
-
             hipStreamCreateWithFlags(&gpu->stream, hipStreamNonBlocking);
 
-            hipDeviceSynchronize();
+            hipMallocAsync((void **)&gpu->data_d, sizeof_data, gpu->stream);
+
+            hipMallocAsync((void **)&gpu->cc_mat_d, sizeof_cc_mat, gpu->stream);
+            hipMallocAsync((void **)&gpu->cc_out_d, sizeof_cc_out, gpu->stream);
+
+            hipMallocAsync((void **)&gpu->moveouts_d, bytes, gpu->stream);
+            hipMallocAsync((void **)&gpu->weights_d, bytes, gpu->stream);
+            hipMallocAsync((void **)&gpu->sum_square_templates_d, bytes, gpu->stream);
+            hipMallocAsync((void **)&gpu->templates_d, bytes * n_samples_template, gpu->stream);
+
+            hipMemcpyAsync(gpu->data_d, data, sizeof_data, hipMemcpyHostToDevice, gpu->stream);
+
+            gpu->sharedMem = check_sharedMem(gpu->id, n_samples_template, step);
         }
+
+        hipDeviceSynchronize();
 
         // loop over templates
         #pragma omp parallel for schedule(static,1) num_threads(nGPUs)
