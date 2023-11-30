@@ -22,6 +22,8 @@
 #define STABILITY_THRESHOLD 0.000001f
 #define MEGABYTES pow(1024, 2)
 
+#define GPUSMAX 8 
+
 extern "C"
 { // needed for C-style symbols in shared object compiled by nvcc
 #include "matched_filter_GPU.h"
@@ -165,6 +167,41 @@ extern "C"
         }
     }
 
+    size_t check_sharedMem(const int gpu_id, const size_t n_samples_template, const size_t step)
+    {
+        const size_t Mb = MEGABYTES;
+        static hipDeviceProp_t props[GPUSMAX];
+        static bool props_init[GPUSMAX] = { 0 };
+
+        if (props_init[gpu_id] == false)
+        {
+            hipGetDeviceProperties(&props[gpu_id], gpu_id);
+            props_init[gpu_id] = true;
+        }
+
+        // calculate the space required in the shared memory
+        const size_t count_template = (n_samples_template / WARPSIZE + 1) * WARPSIZE;
+        const size_t count_data = ((n_samples_template + BLOCKSIZE * step) / WARPSIZE + 1) * WARPSIZE;
+        const size_t sharedMem = (count_template + count_data + 1) * sizeof(float);
+        const int maxSharedMem = props[gpu_id].sharedMemPerBlock;
+        if (sharedMem > maxSharedMem)
+        {
+            size_t new_step = (maxSharedMem / sizeof(float) - 2 * n_samples_template - 2 * WARPSIZE) / BLOCKSIZE;
+            int new_length = maxSharedMem / sizeof(float) - count_data - WARPSIZE;
+            if (new_length < 0)
+                new_length = 0;
+            printf("The maximum shared memory available on this card is %zu Mb "
+                   "(%zu Mb required). You should consider the different options:\n"
+                   "  - Change the temporal step to %zu without changing the template length.\n"
+                   "  - Change the template length to %d without changing the temporal step.\n"
+                   "  - Try to decrease both of these parameters.\n",
+                   maxSharedMem / Mb, sharedMem / Mb, new_step, new_length);
+            exit(0);
+        }
+
+        return sharedMem;
+    }
+
     //-------------------------------------------------------------------------
     void matched_filter(float *templates, float *sum_square_templates,
                         int *moveouts, float *data, float *weights, size_t step,
@@ -173,9 +210,8 @@ extern "C"
                         size_t n_components, size_t n_corr,
                         float *cc_out, int normalize, int sum_cc_mode)
     {
-
+        const size_t Mb = MEGABYTES;
         int t_global = -1;
-        size_t Mb = MEGABYTES;
         size_t sizeof_cc_out = 0;
         size_t sizeof_cc_out_chunk = 0;
 
@@ -203,9 +239,6 @@ extern "C"
         float *data_d = NULL;
         int id;
 
-        hipDeviceProp_t props;
-        hipGetDeviceProperties(&props, 0);
-
         // Card-dependent settings: prefer L1 cache or shared memory
         hipDeviceSetCacheConfig(hipFuncCachePreferShared);
         // cudaDeviceSetCacheConfig(cudaFuncCachePreferL1);
@@ -226,25 +259,7 @@ extern "C"
         hipMalloc((void **)&data_d, sizeof_data);
         hipMemcpy(data_d, data, sizeof_data, hipMemcpyHostToDevice);
 
-        // calculate the space required in the shared memory
-        const size_t count_template = (n_samples_template / WARPSIZE + 1) * WARPSIZE;
-        const size_t count_data = ((n_samples_template + BLOCKSIZE * step) / WARPSIZE + 1) * WARPSIZE;
-        const size_t sharedMem = (count_template + count_data + 1) * sizeof(float);
-        const int maxSharedMem = props.sharedMemPerBlock;
-        if (sharedMem > maxSharedMem)
-        {
-            size_t new_step = (maxSharedMem / sizeof(float) - 2 * n_samples_template - 2 * WARPSIZE) / BLOCKSIZE;
-            int new_length = maxSharedMem / sizeof(float) - count_data - WARPSIZE;
-            if (new_length < 0)
-                new_length = 0;
-            printf("The maximum shared memory available on this card is %zu Mb "
-                   "(%zu Mb required). You should consider the different options:\n"
-                   "  - Change the temporal step to %zu without changing the template length.\n"
-                   "  - Change the template length to %d without changing the temporal step.\n"
-                   "  - Try to decrease both of these parameters.\n",
-                   maxSharedMem / Mb, sharedMem / Mb, new_step, new_length);
-            exit(0);
-        }
+        const size_t sharedMem = check_sharedMem(0, n_samples_template, step);
 
         // loop over templates
         for (size_t t = 0; t < n_templates; t++)
